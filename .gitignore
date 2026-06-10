@@ -1,0 +1,25 @@
+# Compiled binaries (no extension)
+bw_bench
+compute_bench
+roofline_gen
+matmul_profile
+conv_profile
+mini_cnn
+bound_analysis
+fix_perf
+demo_stream
+
+# Object files
+*.o
+
+# Profiling outputs
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

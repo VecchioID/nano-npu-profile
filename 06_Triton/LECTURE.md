@@ -1,4 +1,4 @@
-# STEP_TRITON：用 Python 写 GPU Kernel
+# 06_Triton：用 Python 写 GPU Kernel
 
 ## 为什么需要 Triton？
 
@@ -42,7 +42,7 @@ Autotuning        手写多版本                     @triton.autotune(configs=[
 ## 运行所有测试
 
 ```bash
-cd STEP_TRITON
+cd 06_Triton
 
 python3 00_tutorial.py    # 入门教程
 python3 01_baseline.py    # 测天花板

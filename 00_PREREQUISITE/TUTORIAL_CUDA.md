@@ -633,14 +633,124 @@ double ai = flops / bytes;                // FLOP/Byte
 | Launch Overhead | 启动开销 | CPU 到 GPU 的 kernel 启动时间 (~5-10 µs) |
 | CUDA Graph | — | 预编译 kernel 执行图，消除启动开销 |
 
+
 ---
 
-## 写在最后
+## 11. PyTorch 模型到 CUDA Kernel 的完整链路
 
-**GPU 编程的核心心法：**
+### 11.1 从 Python 到 GPU 晶体管
 
-1. **数据搬运比计算贵。** 尽量把数据留在 GPU 上，减少 CPU-GPU 传输。
-2. **每次读 global memory 都要想：这次读的值用了几次？** 只用一次就是浪费。
-3. **Warp 是上帝。** 所有优化归根结底是让 warp 高效工作。
-4. **Profile 之后再优化。** 靠猜不如靠 ncu/nsys。
-5. **先让代码正确，再让它快。** 不正确的快没有意义。
+```
+PyTorch 模型推理 (Python)
+    │
+    ▼
+ATen 层 (C++)       at::conv2d(input, weight, ...)
+    │               检查设备 → dispatch 到 CUDA 后端
+    ▼
+CUDA Dispatch       at::native::conv2d_cuda(...)
+    │               调用 cuDNN / cuBLAS 或自家实现
+    ▼
+cuDNN / cuBLAS      cudnnConvolutionForward(...)
+    │               根据参数选最优 kernel
+    ▼
+CUDA Driver         cudaLaunchKernel(kernel_func, grid, block, args)
+    │               写入命令缓冲区 → 通知 GPU
+    ▼
+GPU 硬件            SM 取指令 → warp 调度 → 执行
+```
+
+**这条链路上，`cudaLaunchKernel` 启动的那个函数就是 kernel。**
+
+```
+你在 Step 03 写的:
+  __global__ void matmul_naive(...) { ... }
+  matmul_naive<<<grid, block>>>(A, B, C)   → 这是 1 个 kernel
+
+cuDNN 做的事:
+  它也有一堆 __global__ 函数（在 cuDNN 的二进制里）
+  它根据 conv 参数，选一个最合适的来启动
+
+PyTorch ReLU:
+  一个很短的 element-wise kernel ← 也是 kernel
+
+所以一个 PyTorch 层背后可能是 1 个 kernel，也可能是多个:
+  AlexNet conv1:
+    PyTorch: y = self.conv1(x)
+      → dispatch → cuDNN 可能启动 1 个 fused kernel
+      或 3 个: im2col + GEMM + bias_add
+```
+
+### 11.2 怎么"看到"这一层跑了几个 kernel？
+
+用 **nsys**（你在 Step 04 已经做过）：
+
+```bash
+nsys profile -o trace python3 your_model.py
+nsys-ui trace.nsys-rep
+```
+
+时间线上每条彩色小条 = 1 个 kernel launch。
+
+### 11.3 用自己的 kernel 替换 PyTorch 层
+
+四种方法，从简单到复杂：
+
+```
+方法 A: 用现有操作组合 (不写 kernel)
+  def my_linear(x, w, b):
+      return x @ w.T + b         # 调 cuBLAS GEMM
+
+方法 B: torch.compile (零成本)
+  model = torch.compile(model, mode="reduce-overhead")
+
+方法 C: Triton (推荐，见 06_Triton/)
+  @triton.jit
+  def my_kernel(...): ...
+  class MyOp(torch.autograd.Function):
+      def forward(ctx, x, w): return my_kernel(x, w)
+
+方法 D: CUDA C++ Extension (极致性能)
+  from torch.utils.cpp_extension import load
+  ext = load(name="my_ext", sources=["my_kernel.cu"])
+```
+
+### 11.4 TileLang 是什么
+
+```
+TileLang (2024+) = 比 Triton 更高层的张量编译器。
+
+Triton:  你写"每个 block 做什么" (program_id, tl.dot, tl.load...)
+TileLang: 你声明"我要对 M 维度做 tile，对 N 维度做 tile"
+          编译器负责生成具体 CUDA kernel
+
+三者的抽象层次:
+  CUDA C++:   手写所有细节 (你在 Steps 01-05)
+  Triton:     自动 SMEM / coalescing (06_Triton)
+  TileLang:   自动 tiling + sparse pattern (DeepSeek DSA)
+
+目前 (2026) 的状态:
+  Triton:     生产可用，PyTorch 编译后端
+  TileLang:   DeepSeek V3.2 用了，但还没普及
+```
+
+### 11.5 Kernel 的本质回顾
+
+```
+SM (Streaming Multiprocessor) = 一个有 128 个 CUDA core 的处理器
+整个 GPU 有 20 个 SM (Thor)
+
+kernel = 一段要在这 20 个 SM 上并行执行的程序
+
+执行过程:
+  1. GPU 把 kernel 分配到 SM (每个 SM 处理一个或多个 thread block)
+  2. 每个 SM 把 thread block 分成 warp (32 thread 一组)
+  3. warp 里的 32 个 thread 同时执行同一行指令 (SIMT)
+
+你在前面每个实验都直接操作了 kernel:
+  Step 01:  bw_bench.cu → copy_kernel
+  Step 02:  roofline_gen.cu → benchmark kernels
+  Step 03:  matmul_naive, matmul_tiled, matmul_wmma
+  Step 04:  mini_cnn.cu → conv_layer, fc_layer
+  Step 05:  bound_analysis.cu → 5 种瓶颈 kernel
+  Step 06:  @triton.jit 函数 (编译成 GPU kernel)
+```

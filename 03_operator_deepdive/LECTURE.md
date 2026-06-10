@@ -582,7 +582,7 @@ K 循环总访存 = 64 × 1024 + 1024（最后的 store）= 66,560 bytes
 
 ## 3.7 三层的 roofline 全景
 
-![Roofline Model](../roofline.png)
+![Roofline Model](../02_roofline/roofline.png)
 
 *实际生成的 roofline 图。紫色 X = WMMA FP16 matmul (1024³) 实测点 (3,890 GFLOP/s)，红色菱形 = TC FP16 纯吞吐天花板 (12,527 GFLOP/s)，蓝色圆点 = matmul 各规格，绿色方块 = 带宽 copy。*
 
